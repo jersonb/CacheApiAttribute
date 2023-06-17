@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
+using StackExchange.Redis;
 
 namespace TestAnnotation.Controllers;
 
@@ -15,7 +16,7 @@ public class TestController : ControllerBase
         _data = new Data();
     }
 
-    [CacheTest("test-all")]
+    [CacheTest(Schema = "test-all")]
     [HttpGet]
     public async Task<IActionResult> GetByStatus(bool? status)
     {
@@ -35,12 +36,123 @@ public class TestController : ControllerBase
         return Ok(resultInactives);
     }
 
-    [CacheTest("test-by-id")]
+    [CacheTest(Schema = "test-by-id", Expiration = 120)]
     [HttpGet("{uuid}")]
     public async Task<IActionResult> Get(Guid uuid)
     {
         var result = await _data.GetById(uuid);
         return Ok(result);
+    }
+}
+
+[AttributeUsage(AttributeTargets.Method)]
+public class CacheTestAttribute : ActionFilterAttribute
+{
+    private string _key = string.Empty;
+    private ICache _cache = null!;
+
+    public string Schema { get; set; } = string.Empty!;
+    public int Expiration { get; set; } = 60;
+
+    public override Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+    {
+        _cache = context.HttpContext.RequestServices.GetService<ICache>()!;
+        if (_cache.IsEnabled)
+        {
+            SetKey(context);
+
+            var resultCache = _cache.Get(_key);
+
+            if (resultCache != null)
+            {
+                context.Result = new OkObjectResult(JsonSerializer.Deserialize<object>(resultCache, new JsonSerializerOptions { WriteIndented = true }));
+                return Task.CompletedTask;
+            }
+        }
+        return next();
+    }
+
+    public override void OnResultExecuted(ResultExecutedContext context)
+    {
+        if (_cache.IsEnabled)
+        {
+            var result = (ObjectResult)context.Result;
+
+            if (result != null && result.StatusCode == 200 && result.Value != null && !_cache.HasValue(_key))
+            {
+                _cache.Set(_key, JsonSerializer.Serialize(result.Value), Expiration);
+            }
+        }
+        base.OnResultExecuted(context);
+    }
+
+    private void SetKey(ActionExecutingContext context)
+    {
+        var controller = context.ActionDescriptor.RouteValues["controller"];
+        var action = context.ActionDescriptor.RouteValues["action"];
+        var parameters = string.Join("-", context.ActionArguments.Select(x => $"{x.Key}-{x.Value}"));
+
+        _key = $"{Schema}-{controller}-{action}-{parameters}";
+    }
+}
+
+public interface ICache
+{
+    string? Get(string key);
+
+    void Set(string key, string value, int secondsToExpire);
+
+    bool HasValue(string key);
+
+    bool IsEnabled { get; }
+}
+
+public class CacheRedis : ICache
+{
+    private readonly IDatabase? _cache;
+    public bool IsEnabled { get; }
+
+    public CacheRedis(RedisProvider cacheProvider)
+    {
+        _cache = cacheProvider.Cache;
+        IsEnabled = _cache != null;
+    }
+
+    public string? Get(string key)
+    {
+        return _cache!.StringGet(key);
+    }
+
+    public bool HasValue(string key)
+    {
+        return _cache!.KeyExists(key);
+    }
+
+    public void Set(string key, string value, int secondsToExpire)
+    {
+        _cache!.StringSet(key, value, TimeSpan.FromSeconds(secondsToExpire));
+    }
+}
+
+public class RedisProvider
+{
+    public IDatabase Cache { get; }
+
+    public RedisProvider(IConfiguration configuration)
+    {
+        var cacheEnabled = configuration.GetValue<bool>("CacheEnabled");
+        if (cacheEnabled)
+        {
+            var coonnectionString = configuration.GetConnectionString("Redis")
+                 ?? throw new InvalidOperationException("Connection string 'redis' not found.");
+
+            var redis = ConnectionMultiplexer.Connect(coonnectionString);
+            Cache = redis.GetDatabase();
+        }
+        else
+        {
+            Cache = null!;
+        }
     }
 }
 
@@ -84,72 +196,5 @@ public class Data
     {
         await Task.Delay(3000);
         return _users[uuid];
-    }
-}
-
-[AttributeUsage(AttributeTargets.Method)]
-public class CacheTestAttribute : ActionFilterAttribute
-{
-    public CacheTestAttribute(string schema)
-    {
-        Schema = schema;
-        _key = string.Empty;
-    }
-
-    private string _key;
-    public string Schema { get; }
-
-    public override Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
-    {
-        SetKey(context);
-
-        var resultCache = Cache.Get(_key);
-
-        if (resultCache != null)
-        {
-            context.Result = new OkObjectResult(JsonSerializer.Deserialize<object>(resultCache, new JsonSerializerOptions { WriteIndented = true }));
-            return Task.CompletedTask;
-        }
-        return next();
-    }
-
-    private void SetKey(ActionExecutingContext context)
-    {
-        var controller = context.ActionDescriptor.RouteValues["controller"];
-        var action = context.ActionDescriptor.RouteValues["action"];
-        var parameters = string.Join("-", context.ActionArguments.Select(x => $"{x.Key}-{x.Value}"));
-
-        _key = $"{Schema}-{controller}-{action}-{parameters}";
-    }
-
-    public override void OnResultExecuted(ResultExecutedContext context)
-    {
-        var result = (ObjectResult)context.Result;
-
-        if (result != null && result.StatusCode == 200 && result.Value != null && !Cache.HasValue(_key))
-        {
-            Cache.Set(_key, JsonSerializer.Serialize(result.Value));
-        }
-        base.OnResultExecuted(context);
-    }
-}
-
-public static class Cache
-{
-    private static readonly Dictionary<string, string> _cache = new();
-
-    public static string? Get(string key)
-    {
-        return _cache.FirstOrDefault(x => x.Key == key).Value;
-    }
-
-    public static void Set(string key, string value)
-    {
-        _cache.Add(key, value);
-    }
-
-    public static bool HasValue(string key)
-    {
-        return _cache.ContainsKey(key);
     }
 }

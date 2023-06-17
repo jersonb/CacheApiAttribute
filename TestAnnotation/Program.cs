@@ -1,3 +1,5 @@
+using TestAnnotation.Controllers;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -7,7 +9,8 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-builder.Logging.AddConsole(configure => configure.TimestampFormat = "[HH:mm:ss] ");
+builder.Services.AddSingleton<RedisProvider>();
+builder.Services.AddSingleton<ICache, CacheRedis>();
 
 var app = builder.Build();
 
