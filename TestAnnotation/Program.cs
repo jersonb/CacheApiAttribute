@@ -27,4 +27,13 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+using (var scope = app.Services.CreateScope())
+{
+    var cache = scope.ServiceProvider.GetRequiredService<ICache>();
+    if (cache.IsEnabled)
+    {
+        cache.Set("up", "Ok!", 120);
+    }
+}
+
 app.Run();
